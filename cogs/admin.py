@@ -87,6 +87,9 @@ class Admin(commands.Cog):
         e.add_field(name="/admin_giveaway",
                     value='Create giveaways, draw winners, view history.',
                     inline=False)
+        e.add_field(name="/admin_taxgiveaway",
+                    value='Giveaways paid from the bot tax pool (10% of guild market sales): view pool, run a draw, view history.',
+                    inline=False)
         e.add_field(name="/admin_player",
                     value='View / reset / ban / unban players.',
                     inline=False)
@@ -409,6 +412,97 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             embed=emb('🎉 Giveaway Drawn',
                       'Giveaway #{id} was won by: {mentions}'.format(id=giveaway_id,mentions=mentions), COLOR_OK),
+            ephemeral=True)
+
+    # ------------------------------------------------- tax giveaway
+    @app_commands.command(name="admin_taxgiveaway",
+                          description="Giveaways paid from the bot tax pool (funded by market tax)")
+    @app_commands.describe(
+        aksi="pool = view tax pool balance, run = draw winners now, list = history",
+        jumlah="Total gold to give away (for run; must fit the pool)",
+        pemenang="Number of winners (for run)")
+    @app_commands.rename(aksi="action", jumlah="total_gold",
+                         pemenang="winners")
+    @app_commands.choices(
+        aksi=[app_commands.Choice(name="pool", value="pool"),
+              app_commands.Choice(name="run", value="run"),
+              app_commands.Choice(name="list", value="list")],
+    )
+    async def admin_taxgiveaway(self, interaction: discord.Interaction,
+                                aksi: str, jumlah: int = 0, pemenang: int = 1):
+        if not await require_staff(interaction):
+            return
+        with adb.connect() as conn:
+            if aksi == "pool":
+                await interaction.response.send_message(
+                    embed=emb('💰 Bot Tax Pool',
+                              'Current pool balance: **{bal} gold**.\n'
+                              'The pool grows by 10% of every guild market sale. '
+                              'Run a draw with /admin_taxgiveaway action:run '
+                              'total_gold:<amount> winners:<count>.'.format(bal=adb.tax_pool_balance(conn)),
+                              COLOR_INFO),
+                    ephemeral=True)
+                return
+            if aksi == "list":
+                rows = adb.list_tax_giveaways(conn)
+                if not rows:
+                    await interaction.response.send_message(
+                        embed=emb('💰 Tax Giveaways', 'No tax giveaways yet.', COLOR_INFO),
+                        ephemeral=True)
+                    return
+                lines = []
+                for g in rows:
+                    winners = g["winners"].split(",") if g["winners"] else []
+                    mentions = ", ".join(f"<@{w}>" for w in winners)
+                    lines.append('#{id} • {total} gold total ({per} each) • {n} winners • {mentions}'.format(
+                        id=g["id"], total=g["total_gold"], per=g["per_winner"],
+                        n=g["winners_count"], mentions=mentions))
+                await interaction.response.send_message(
+                    embed=emb('💰 Latest Tax Giveaways', "\n".join(lines),
+                              COLOR_INFO),
+                    ephemeral=True)
+                return
+            # aksi == run
+            if jumlah < 1 or pemenang < 1:
+                await interaction.response.send_message(
+                    embed=err("Total gold and winners must be ≥ 1."),
+                    ephemeral=True)
+                return
+            pool = adb.tax_pool_balance(conn)
+            if jumlah > pool:
+                await interaction.response.send_message(
+                    embed=err("Tax pool holds only {pool} gold — the prize total must fit the pool.".format(pool=pool)),
+                    ephemeral=True)
+                return
+            eligible = adb.eligible_players(conn)
+            if not eligible:
+                await interaction.response.send_message(
+                    embed=err("No players can be drawn."),
+                    ephemeral=True)
+                return
+            winners = random.sample(eligible, min(pemenang, len(eligible)))
+            per_winner, _remainder = adb.split_prize(jumlah, len(winners))
+            # The remainder of an uneven split stays in the pool; only
+            # per_winner * len(winners) leaves it.
+            spent = per_winner * len(winners)
+            if not adb.take_tax_pool(conn, spent):
+                await interaction.response.send_message(
+                    embed=err("Tax pool changed mid-draw — try again."),
+                    ephemeral=True)
+                return
+            for w in winners:
+                adb.adjust_gold(conn, w, per_winner)
+            gid = adb.record_tax_giveaway(
+                conn, spent, per_winner, len(winners), winners,
+                interaction.user.id)
+        mentions = ", ".join(f"<@{w}>" for w in winners)
+        await interaction.response.send_message(
+            embed=emb('💰 Tax Giveaway Drawn',
+                      'Tax giveaway #{id}: **{per} gold** each to: {mentions}\n'
+                      'Paid from the bot tax pool (pool left: {left} gold).'.format(
+                          id=gid, per=per_winner, mentions=mentions,
+                          left=pool - spent),
+                      COLOR_OK),
             ephemeral=True)
 
     # ---------------------------------------------------------- player

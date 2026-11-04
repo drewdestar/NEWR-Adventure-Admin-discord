@@ -78,6 +78,30 @@ CREATE TABLE IF NOT EXISTS seasons (
     starts_at INTEGER NOT NULL,
     ended_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS tax_pool (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    balance INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tax_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    buyer_id INTEGER NOT NULL,
+    buyer_guild_id INTEGER,
+    seller_guild_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    qty INTEGER NOT NULL DEFAULT 0,
+    sale_price INTEGER NOT NULL DEFAULT 0,
+    tax INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tax_giveaways (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    total_gold INTEGER NOT NULL DEFAULT 0,
+    per_winner INTEGER NOT NULL DEFAULT 0,
+    winners_count INTEGER NOT NULL DEFAULT 0,
+    winners TEXT NOT NULL DEFAULT '',
+    created_by INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # Season 1 starts at bot launch day: 2026-11-05 00:00 WIB (UTC+7).
@@ -388,6 +412,52 @@ def eligible_players(conn):
         "(SELECT user_id FROM admin_bans)"
     ).fetchall()
     return [r["user_id"] for r in rows]
+
+
+# ------------------------------------------------- tax pool & giveaways
+# (shared with the main bot's guildbank_db module; DDL identical, so
+# either bot may create these tables first. The pool is funded by the
+# 10% tax on every guild market sale; this admin command spends it.)
+def tax_pool_balance(conn):
+    row = conn.execute(
+        "SELECT balance FROM tax_pool WHERE id = 1").fetchone()
+    return row["balance"] if row else 0
+
+
+def take_tax_pool(conn, amount):
+    """Remove amount from the pool. Returns False if funds are short."""
+    if tax_pool_balance(conn) < amount:
+        return False
+    conn.execute(
+        "UPDATE tax_pool SET balance = balance - ? WHERE id = 1",
+        (int(amount),))
+    conn.commit()
+    return True
+
+
+def split_prize(total, winners_count):
+    """(per_winner, remainder): equal split, remainder stays in the pool."""
+    winners_count = max(1, int(winners_count))
+    per_winner = int(total) // winners_count
+    return per_winner, int(total) - per_winner * winners_count
+
+
+def record_tax_giveaway(conn, total_gold, per_winner, winners_count,
+                        winners, created_by):
+    cur = conn.execute(
+        "INSERT INTO tax_giveaways (total_gold, per_winner, winners_count, "
+        "winners, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (int(total_gold), int(per_winner), int(winners_count),
+         ",".join(str(w) for w in winners), created_by, int(time.time())))
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_tax_giveaways(conn, limit=5):
+    rows = conn.execute(
+        "SELECT * FROM tax_giveaways ORDER BY id DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [row_to_dict(r) for r in rows]
 
 
 # -------------------------------------------------------------- stats

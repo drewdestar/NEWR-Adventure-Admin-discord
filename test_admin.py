@@ -188,6 +188,23 @@ def main():
     check("gate: tanpa permission ditolak",
           adb.is_staff(NoPerms()) is False)
 
+    # --- tax pool & tax giveaways (phase 2)
+    check("pool pajak mulai 0", adb.tax_pool_balance(conn) == 0)
+    conn.execute("INSERT INTO tax_pool (id, balance) VALUES (1, 250)")
+    conn.commit()
+    check("pool pajak terbaca", adb.tax_pool_balance(conn) == 250)
+    check("tarik pool melebihi saldo ditolak",
+          adb.take_tax_pool(conn, 251) is False
+          and adb.tax_pool_balance(conn) == 250)
+    check("split hadiah pajak", adb.split_prize(100, 3) == (33, 1))
+    check("tarik pool berhasil",
+          adb.take_tax_pool(conn, 99) is True
+          and adb.tax_pool_balance(conn) == 151)
+    gid3 = adb.record_tax_giveaway(conn, 99, 33, 3, [1, 2, 1], 9)
+    rows = adb.list_tax_giveaways(conn)
+    check("tax giveaway tercatat",
+          rows and rows[0]["id"] == gid3 and rows[0]["total_gold"] == 99)
+
     conn.close()
     failed = [n for n, ok in CHECKS if not ok]
     print()
