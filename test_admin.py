@@ -166,6 +166,21 @@ def main():
           s["total_gold"] == adb.get_player(conn, 1)["gold"]
           + adb.get_player(conn, 2)["gold"])
 
+    # --- seasons & achievements (admin helpers)
+    seasons = adb.list_seasons(conn)
+    check("season 1 seeded",
+          len(seasons) == 1 and seasons[0]["number"] == 1
+          and seasons[0]["ended_at"] is None)
+    check("start season -> S2", adb.start_season(conn) == 2)
+    seasons = adb.list_seasons(conn)
+    check("season lama tertutup, S2 aktif",
+          len(seasons) == 2 and seasons[0]["ended_at"] is not None
+          and seasons[1]["ended_at"] is None)
+    check("grant achievement baru",
+          adb.grant_achievement(conn, 1, "Boss Slayer") is True)
+    check("grant achievement idempotent",
+          adb.grant_achievement(conn, 1, "Boss Slayer") is False)
+
     # --- gate Administrator (fungsi murni)
     check("gate: admin lolos", adb.is_staff(FakeMember(True)) is True)
     check("gate: non-admin ditolak",

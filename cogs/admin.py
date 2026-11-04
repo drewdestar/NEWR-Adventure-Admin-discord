@@ -11,6 +11,7 @@ Gate: SETIAP command memeriksa Discord Administrator. Bukan admin server
 = ditolak dengan pesan jelas. Tidak ada pengecualian.
 """
 import random
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
@@ -53,6 +54,11 @@ def canon_item(name):
         if it.lower() == low:
             return it
     return None
+
+
+def _wib(ts):
+    return datetime.fromtimestamp(
+        ts, tz=timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
 
 
 class Admin(commands.Cog):
@@ -181,7 +187,7 @@ class Admin(commands.Cog):
                           description="Manage player gold & server rates")
     @app_commands.describe(
         aksi="give/take/set = player gold; rate_exp/rate_gold = server rate",
-        pemain="Target player (not needed for rates)",
+        pemain="Target player: mention or user ID (not needed for rates)",
         jumlah="Gold (give/take/set) or rate percent (100 = 1.0x)")
     @app_commands.rename(aksi="action", pemain="player", jumlah="amount")
     @app_commands.choices(
@@ -248,7 +254,7 @@ class Admin(commands.Cog):
     # ------------------------------------------------------------ give
     @app_commands.command(name="admin_give",
                           description="Give an item or pet to a player")
-    @app_commands.describe(pemain="Receiving player",
+    @app_commands.describe(pemain="Receiving player (mention or user ID)",
                            jenis="item or pet",
                            nama="Item name / pet species",
                            jumlah="Item amount (ignored for pets)")
@@ -410,7 +416,7 @@ class Admin(commands.Cog):
                           description="View / reset / ban / unban an RPG player")
     @app_commands.describe(
         aksi="view, reset, ban, or unban",
-        pemain="Target player",
+        pemain="Target player (mention or user ID)",
         alasan="Ban reason (for ban)",
         konfirmasi="Write RESET for the reset action (safety)")
     @app_commands.rename(aksi="action", pemain="player", alasan="reason",
@@ -558,6 +564,72 @@ class Admin(commands.Cog):
         await interaction.response.send_message(
             embed=emb('📢 Announcement Sent',
                       'Announcement sent to <#{id}>.'.format(id=channel.id),
+                      COLOR_OK),
+            ephemeral=True)
+
+    @app_commands.command(name="admin_season",
+                          description="List seasons or start a new season")
+    @app_commands.describe(aksi="list = show seasons, start = open a new season now")
+    @app_commands.rename(aksi="action")
+    @app_commands.choices(
+        aksi=[app_commands.Choice(name="list", value="list"),
+              app_commands.Choice(name="start", value="start")])
+    async def admin_season(self, interaction: discord.Interaction,
+                           aksi: str):
+        if not await require_staff(interaction):
+            return
+        with adb.connect() as conn:
+            if aksi == "list":
+                seasons = adb.list_seasons(conn)
+                lines = []
+                for s in seasons:
+                    end = _wib(s["ended_at"]) if s["ended_at"] else "Active"
+                    lines.append(
+                        f"Season S{s['number']}: {_wib(s['starts_at'])} → {end}")
+                await interaction.response.send_message(
+                    embed=emb('📅 Seasons',
+                              "\n".join(lines) if lines else "No seasons yet.",
+                              COLOR_INFO),
+                    ephemeral=True)
+                return
+            new_number = adb.start_season(conn)
+        await interaction.response.send_message(
+            embed=emb('📅 New Season Started',
+                      f"Season S{new_number} is now active. Players who "
+                      f"register from now on get the Season S{new_number} "
+                      f"role; existing players keep their season role.",
+                      COLOR_OK),
+            ephemeral=True)
+
+    @app_commands.command(name="admin_achievement",
+                          description="Grant an achievement to a player")
+    @app_commands.describe(pemain="Receiving player (mention or user ID)",
+                           nama="Achievement name (e.g. Boss Slayer, War Champion)")
+    @app_commands.rename(pemain="player", nama="name")
+    async def admin_achievement(self, interaction: discord.Interaction,
+                                pemain: discord.User, nama: str):
+        if not await require_staff(interaction):
+            return
+        nama = nama.strip()
+        if not nama or len(nama) > 32:
+            await interaction.response.send_message(
+                embed=err("Achievement names must be 1-32 characters."),
+                ephemeral=True)
+            return
+        with adb.connect() as conn:
+            if adb.get_player(conn, pemain.id) is None:
+                await interaction.response.send_message(
+                    embed=err("That user doesn't have a character yet."),
+                    ephemeral=True)
+                return
+            new = adb.grant_achievement(conn, pemain.id, nama)
+        await interaction.response.send_message(
+            embed=emb('🏆 Achievement Granted' if new
+                      else '🏆 Achievement Already Owned',
+                      f"**{nama}** {'granted to' if new else 'already owned by'} "
+                      f"{pemain.mention}. The matching Discord role is "
+                      f"applied by the main bot's role reconciler within "
+                      f"10 minutes.",
                       COLOR_OK),
             ephemeral=True)
 

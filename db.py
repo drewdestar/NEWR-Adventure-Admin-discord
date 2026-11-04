@@ -13,6 +13,9 @@ Aturan akses bersama (penting, karena dua bot memakai satu file SQLite):
 - Hanya tabel admin_* dan giveaways yang dibuat bot ini (CREATE TABLE
   IF NOT EXISTS). Tabel bot RPG hanya dibaca/ditulis lewat kolom yang
   sudah ada di skemanya.
+- Pengecualian: tabel seasons dan achievements juga dibuat di sini
+  (DDL identik dengan bot utama) supaya command /admin_season dan
+  /admin_achievement tidak bergantung pada bot utama yang sudah jalan.
 """
 import os
 import sqlite3
@@ -64,7 +67,22 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     user_id INTEGER PRIMARY KEY,
     language TEXT NOT NULL DEFAULT 'id'
 );
+CREATE TABLE IF NOT EXISTS achievements (
+    user_id INTEGER NOT NULL,
+    achievement TEXT NOT NULL,
+    granted_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, achievement)
+);
+CREATE TABLE IF NOT EXISTS seasons (
+    number INTEGER PRIMARY KEY,
+    starts_at INTEGER NOT NULL,
+    ended_at INTEGER
+);
 """
+
+# Season 1 starts at bot launch day: 2026-11-05 00:00 WIB (UTC+7).
+# Must match the main bot's rolesync.SEASON_1_START.
+SEASON_1_START = 1793811600
 
 
 def db_path():
@@ -311,6 +329,56 @@ def draw_giveaway(conn, gid, winners):
         (",".join(str(w) for w in winners), gid),
     )
     conn.commit()
+
+
+# ------------------------------------------------- seasons & achievements
+# (shared with the main bot's rolesync module; DDL identical, and the
+# Season 1 seed is idempotent, so either bot may create them first.)
+def grant_achievement(conn, user_id, key):
+    """Record an achievement (idempotent). Returns True if newly granted."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO achievements (user_id, achievement, granted_at)"
+        " VALUES (?, ?, ?)", (user_id, key, int(time.time())))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_seasons(conn):
+    conn.execute(
+        "INSERT INTO seasons (number, starts_at, ended_at) "
+        "SELECT 1, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM seasons)",
+        (SEASON_1_START,))
+    conn.commit()
+    rows = conn.execute(
+        "SELECT * FROM seasons ORDER BY number").fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def start_season(conn):
+    """Close the current season and open a new one starting now.
+
+    Seasons advance ONLY when an admin starts one, never automatically.
+    Returns the new season number.
+    """
+    now = int(time.time())
+    cur = conn.execute(
+        "SELECT * FROM seasons ORDER BY number DESC LIMIT 1").fetchone()
+    if cur is None:
+        # Table was empty (should not happen: Season 1 is seeded on
+        # boot). Seed it and report Season 1 as active.
+        conn.execute(
+            "INSERT INTO seasons (number, starts_at, ended_at) "
+            "VALUES (1, ?, NULL)", (SEASON_1_START,))
+        conn.commit()
+        return 1
+    conn.execute("UPDATE seasons SET ended_at = ? WHERE number = ?",
+                 (now, cur["number"]))
+    new_number = cur["number"] + 1
+    conn.execute(
+        "INSERT INTO seasons (number, starts_at, ended_at) "
+        "VALUES (?, ?, NULL)", (new_number, now))
+    conn.commit()
+    return new_number
 
 
 def eligible_players(conn):
