@@ -19,14 +19,19 @@ from discord import app_commands
 from discord.ext import commands
 
 import db as adb
+import i18n
 from data import (COLOR_ADMIN, COLOR_ERROR, COLOR_GOLD, COLOR_INFO,
                   COLOR_OK, CREDIT, DEFAULT_RULES, EVENTS, ITEMS, PETS,
                   TITLE)
 
-def emb(title, desc="", color=COLOR_ADMIN):
-    # Admin bot is English-only (no /language here). Footer credit
-    # stays "NEWR Adventure by NEWR LABS" (footer only, no author link).
-    e = discord.Embed(title=title, description=desc, color=color)
+def emb(title, desc="", color=COLOR_ADMIN, raw=False):
+    # Admin replies use the invoking admin's stored language (same
+    # system as the main bot: offline table -> cache -> online ->
+    # English fallback, never Indonesian for non-Indonesian admins).
+    # Footer credit stays "NEWR Adventure by NEWR LABS" (footer only,
+    # no author link).
+    e = discord.Embed(title=title if raw else i18n.t(title),
+                      description=desc if raw else i18n.t(desc), color=color)
     e.set_footer(text=f"NEWR Adventure {CREDIT}")
     return e
 
@@ -48,6 +53,7 @@ def _log_execution(interaction, target_id=None):
     only record for those."""
     try:
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             adb.log_admin(
                 conn, _command_name(interaction), interaction.user.id,
                 target_id=target_id,
@@ -58,6 +64,11 @@ def _log_execution(interaction, target_id=None):
 
 
 async def require_staff(interaction, target_id=None):
+    try:
+        with adb.connect() as _c:
+            i18n.set_ctx(interaction, _c)
+    except Exception:
+        pass
     """Gate: Discord Administrator OR granted bot-admin. Return True on
     pass (and log the execution), else False + a message (including
     DMs, where there is no server permission)."""
@@ -73,6 +84,7 @@ async def require_staff(interaction, target_id=None):
     if not staff:
         try:
             with adb.connect() as conn:
+                i18n.set_ctx(interaction, conn)
                 staff = adb.is_bot_admin(conn, interaction.user.id)
         except Exception:  # noqa: BLE001 — DB error = deny, safely
             staff = False
@@ -89,6 +101,11 @@ async def require_staff(interaction, target_id=None):
 
 
 async def require_discord_admin(interaction, target_id=None):
+    try:
+        with adb.connect() as _c:
+            i18n.set_ctx(interaction, _c)
+    except Exception:
+        pass
     """Gate: Discord Administrator ONLY. Bot-admins may NOT pass this
     gate — in particular they may never grant bot-admin to anyone.
     Grant/revoke of bot-admin go through this gate only."""
@@ -135,46 +152,46 @@ class Admin(commands.Cog):
             return
         e = emb('🛡️ RPG Admin Panel','All commands below are for server Administrators only. The admin bot shares its database with the RPG bot: same gold, items, and players.', COLOR_ADMIN)
         e.add_field(name="/admin_event",
-                    value='View / start / stop seasonal & meteor events.',
+                    value=i18n.t('View / start / stop seasonal & meteor events.'),
                     inline=False)
         e.add_field(name="/admin_rules",
-                    value='View / set the RPG rules text.',
+                    value=i18n.t('View / set the RPG rules text.'),
                     inline=False)
         e.add_field(name="/admin_currency",
-                    value='Give / take / set player gold, and set server EXP & gold rates.',
+                    value=i18n.t('Give / take / set player gold, and set server EXP & gold rates.'),
                     inline=False)
         e.add_field(name="/admin_give",
-                    value='Give an item or pet to a player.',
+                    value=i18n.t('Give an item or pet to a player.'),
                     inline=False)
         e.add_field(name="/admin_giveaway",
-                    value='Create giveaways, draw winners, view history.',
+                    value=i18n.t('Create giveaways, draw winners, view history.'),
                     inline=False)
         e.add_field(name="/admin_taxgiveaway",
-                    value='Giveaways paid from the bot tax pool (10% of guild market sales): view pool, run a draw, view history.',
+                    value=i18n.t('Giveaways paid from the bot tax pool (10% of guild market sales): view pool, run a draw, view history.'),
                     inline=False)
         e.add_field(name="/admin_player",
-                    value='View / reset / ban / unban players.',
+                    value=i18n.t('View / reset / ban / unban players.'),
                     inline=False)
         e.add_field(name="/admin_stats",
-                    value='Server economy summary: players, gold in circulation, richest players, latest giveaways.',
+                    value=i18n.t('Server economy summary: players, gold in circulation, richest players, latest giveaways.'),
                     inline=False)
         e.add_field(name="/admin_announce",
-                    value='Send an embed announcement to a chosen channel.',
+                    value=i18n.t('Send an embed announcement to a chosen channel.'),
                     inline=False)
         e.add_field(name="/admin_lifetime",
-                    value='Per-player lifetime stats since registration: gold earned, kills, PvP wins/losses, boss kills.',
+                    value=i18n.t('Per-player lifetime stats since registration: gold earned, kills, PvP wins/losses, boss kills.'),
                     inline=False)
         e.add_field(name="/admin_lifetimeboard",
-                    value='Top 10 players by a lifetime metric (gold earned, kills, PvP wins, boss kills, tax paid, deposits).',
+                    value=i18n.t('Top 10 players by a lifetime metric (gold earned, kills, PvP wins, boss kills, tax paid, deposits).'),
                     inline=False)
         e.add_field(name="/admin_tax",
-                    value='Tax pool tools: pool balance & totals, recent sales ledger, top taxpayers/depositors, stored market tax rate.',
+                    value=i18n.t('Tax pool tools: pool balance & totals, recent sales ledger, top taxpayers/depositors, stored market tax rate.'),
                     inline=False)
         e.add_field(name="/admin_botadmin",
-                    value='Grant / revoke / list bot-admins (Discord Administrators only). Bot-admins can run admin commands without Discord Administrator permission, but can never grant bot-admin.',
+                    value=i18n.t('Grant / revoke / list bot-admins (Discord Administrators only). Bot-admins can run admin commands without Discord Administrator permission, but can never grant bot-admin.'),
                     inline=False)
         e.add_field(name="/admin_logs",
-                    value='View recent admin command logs (command, executor, target, server, WIB timestamp to the second), filterable by executor or command.',
+                    value=i18n.t('View recent admin command logs (command, executor, target, server, WIB timestamp to the second), filterable by executor or command.'),
                     inline=False)
         await interaction.response.send_message(embed=e, ephemeral=True)
 
@@ -198,6 +215,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "lihat":
                 rows = adb.list_events(conn)
                 state = {r["event"]: r["state"] for r in rows}
@@ -244,6 +262,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "atur":
                 if not teks or not teks.strip():
                     await interaction.response.send_message(
@@ -259,7 +278,7 @@ class Admin(commands.Cog):
             row = adb.get_rules(conn)
             text = row["text"] if row and row["text"] else DEFAULT_RULES
         await interaction.response.send_message(
-            embed=emb('📜 RPG Rules', text, COLOR_INFO),
+            embed=emb('📜 RPG Rules', text, COLOR_INFO, raw=True),
             ephemeral=True)
 
     # -------------------------------------------------------- currency
@@ -288,6 +307,7 @@ class Admin(commands.Cog):
                 ephemeral=True)
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi in ("rate_exp", "rate_gold"):
                 mult = jumlah / 100.0
                 if mult <= 0 or mult > 10:
@@ -354,6 +374,7 @@ class Admin(commands.Cog):
                 embed=err("Minimum amount is 1."), ephemeral=True)
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if adb.get_player(conn, pemain.id) is None:
                 await interaction.response.send_message(
                     embed=err("That player hasn't registered for the RPG."),
@@ -363,7 +384,7 @@ class Admin(commands.Cog):
                 item = canon_item(nama)
                 if item is None:
                     await interaction.response.send_message(
-                        embed=err("Item '{nama}' is unknown. Check the name again (e.g. pedang besi, potion kecil).".format(nama=nama)),
+                        embed=err("Item '{nama}' is unknown. Check the item key again (e.g. 'pedang besi', 'potion kecil').".format(nama=nama)),
                         ephemeral=True)
                     return
                 adb.add_item(conn, pemain.id, item, jumlah)
@@ -411,6 +432,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "list":
                 rows = adb.list_giveaways(conn)
                 if not rows:
@@ -510,6 +532,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "pool":
                 await interaction.response.send_message(
                     embed=emb('💰 Bot Tax Pool',
@@ -604,6 +627,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction, target_id=pemain.id):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             p = adb.get_player(conn, pemain.id)
             if aksi == "lihat":
                 if p is None:
@@ -683,6 +707,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             s = adb.economy_stats(conn)
             rates = adb.get_rates(conn)
             gws = adb.list_giveaways(conn, limit=3)
@@ -722,7 +747,7 @@ class Admin(commands.Cog):
                              judul: str, pesan: str):
         if not await require_staff(interaction):
             return
-        e = emb(f"📢 {judul}", pesan, COLOR_ADMIN)
+        e = emb(f"📢 {judul}", pesan, COLOR_ADMIN, raw=True)
         e.add_field(name='From',
                     value='RPG Staff', inline=False)
         try:
@@ -750,6 +775,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "list":
                 seasons = adb.list_seasons(conn)
                 lines = []
@@ -788,6 +814,7 @@ class Admin(commands.Cog):
                 ephemeral=True)
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if adb.get_player(conn, pemain.id) is None:
                 await interaction.response.send_message(
                     embed=err("That user doesn't have a character yet."),
@@ -815,6 +842,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction, target_id=pemain.id):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             s = adb.lifetime_stats(conn, pemain.id)
         if s is None:
             await interaction.response.send_message(
@@ -863,6 +891,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             rows = adb.lifetime_leaderboard(conn, metrik, limit=10)
         if not rows:
             await interaction.response.send_message(
@@ -895,6 +924,7 @@ class Admin(commands.Cog):
         if not await require_staff(interaction):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "pool":
                 t = adb.tax_totals(conn)
                 rate = adb.get_tax_rate(conn)
@@ -993,6 +1023,7 @@ class Admin(commands.Cog):
                 interaction, target_id=pemain.id if pemain else None):
             return
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             if aksi == "list":
                 rows = adb.list_bot_admins(conn)
                 if not rows:
@@ -1062,6 +1093,7 @@ class Admin(commands.Cog):
             return
         batas = max(1, min(50, batas))
         with adb.connect() as conn:
+            i18n.set_ctx(interaction, conn)
             rows = adb.list_admin_logs(
                 conn, limit=batas,
                 executor_id=pelaksana.id if pelaksana else None,
