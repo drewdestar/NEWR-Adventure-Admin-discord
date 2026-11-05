@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NEWR Adventure by NEWR LABS — credit marker, do not remove.
 """Cog admin/staff bot RPG — semua command khusus Administrator.
 
 Bot ini MENGELOLA bot NEWR Adventure, bukan memainkannya: event, peraturan, mata
@@ -34,16 +35,71 @@ def err(msg):
     return emb('⚠️ Oops!', msg, color=COLOR_ERROR)
 
 
-async def require_staff(interaction):
-    """Gate Administrator. Return True on pass, else False + a message
-    (including DMs, where there is no server permission)."""
-    if interaction.guild is None or not adb.is_staff(interaction.user):
+def _command_name(interaction):
+    """Name of the slash command being run (for the admin log)."""
+    cmd = getattr(interaction, "command", None)
+    name = getattr(cmd, "name", None) if cmd is not None else None
+    return name or "admin_command"
+
+
+def _log_execution(interaction, target_id=None):
+    """Log one authorized admin command execution. Denied attempts are
+    NOT logged as executions (they never ran); the gate message is the
+    only record for those."""
+    try:
+        with adb.connect() as conn:
+            adb.log_admin(
+                conn, _command_name(interaction), interaction.user.id,
+                target_id=target_id,
+                guild_id=interaction.guild.id if interaction.guild else None,
+                guild_name=interaction.guild.name if interaction.guild else "")
+    except Exception:  # noqa: BLE001 — logging must never block the command
+        pass
+
+
+async def require_staff(interaction, target_id=None):
+    """Gate: Discord Administrator OR granted bot-admin. Return True on
+    pass (and log the execution), else False + a message (including
+    DMs, where there is no server permission)."""
+    if interaction.guild is None:
         await interaction.response.send_message(
-            embed=err("This command is for staff only (server Administrators). "
-                      "Regular members cannot use the admin bot."),
+            embed=err("This command is for staff only (server Administrators "
+                      "or granted bot-admins). Regular members cannot use "
+                      "the admin bot."),
             ephemeral=True,
         )
         return False
+    staff = adb.is_staff(interaction.user)
+    if not staff:
+        try:
+            with adb.connect() as conn:
+                staff = adb.is_bot_admin(conn, interaction.user.id)
+        except Exception:  # noqa: BLE001 — DB error = deny, safely
+            staff = False
+    if not staff:
+        await interaction.response.send_message(
+            embed=err("This command is for staff only (server Administrators "
+                      "or granted bot-admins). Regular members cannot use "
+                      "the admin bot."),
+            ephemeral=True,
+        )
+        return False
+    _log_execution(interaction, target_id=target_id)
+    return True
+
+
+async def require_discord_admin(interaction, target_id=None):
+    """Gate: Discord Administrator ONLY. Bot-admins may NOT pass this
+    gate — in particular they may never grant bot-admin to anyone.
+    Grant/revoke of bot-admin go through this gate only."""
+    if interaction.guild is None or not adb.is_staff(interaction.user):
+        await interaction.response.send_message(
+            embed=err("This command is for Discord server Administrators "
+                      "only. Bot-admins cannot use it."),
+            ephemeral=True,
+        )
+        return False
+    _log_execution(interaction, target_id=target_id)
     return True
 
 
@@ -59,6 +115,12 @@ def canon_item(name):
 def _wib(ts):
     return datetime.fromtimestamp(
         ts, tz=timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M WIB")
+
+
+def _wib_s(ts):
+    """WIB timestamp down to seconds, for admin logs."""
+    return datetime.fromtimestamp(
+        ts, tz=timezone(timedelta(hours=7))).strftime("%d %b %Y %H:%M:%S WIB")
 
 
 class Admin(commands.Cog):
@@ -98,6 +160,21 @@ class Admin(commands.Cog):
                     inline=False)
         e.add_field(name="/admin_announce",
                     value='Send an embed announcement to a chosen channel.',
+                    inline=False)
+        e.add_field(name="/admin_lifetime",
+                    value='Per-player lifetime stats since registration: gold earned, kills, PvP wins/losses, boss kills.',
+                    inline=False)
+        e.add_field(name="/admin_lifetimeboard",
+                    value='Top 10 players by a lifetime metric (gold earned, kills, PvP wins, boss kills, tax paid, deposits).',
+                    inline=False)
+        e.add_field(name="/admin_tax",
+                    value='Tax pool tools: pool balance & totals, recent sales ledger, top taxpayers/depositors, stored market tax rate.',
+                    inline=False)
+        e.add_field(name="/admin_botadmin",
+                    value='Grant / revoke / list bot-admins (Discord Administrators only). Bot-admins can run admin commands without Discord Administrator permission, but can never grant bot-admin.',
+                    inline=False)
+        e.add_field(name="/admin_logs",
+                    value='View recent admin command logs (command, executor, target, server, WIB timestamp to the second), filterable by executor or command.',
                     inline=False)
         await interaction.response.send_message(embed=e, ephemeral=True)
 
@@ -203,7 +280,7 @@ class Admin(commands.Cog):
     async def admin_currency(self, interaction: discord.Interaction,
                              aksi: str, pemain: discord.User = None,
                              jumlah: int = None):
-        if not await require_staff(interaction):
+        if not await require_staff(interaction, target_id=pemain.id if pemain else None):
             return
         if jumlah is None or jumlah < 0:
             await interaction.response.send_message(
@@ -270,7 +347,7 @@ class Admin(commands.Cog):
     async def admin_give(self, interaction: discord.Interaction,
                          pemain: discord.User, jenis: str, nama: str,
                          jumlah: int = 1):
-        if not await require_staff(interaction):
+        if not await require_staff(interaction, target_id=pemain.id):
             return
         if jumlah < 1:
             await interaction.response.send_message(
@@ -524,7 +601,7 @@ class Admin(commands.Cog):
     async def admin_player(self, interaction: discord.Interaction,
                            aksi: str, pemain: discord.User,
                            alasan: str = "", konfirmasi: str = ""):
-        if not await require_staff(interaction):
+        if not await require_staff(interaction, target_id=pemain.id):
             return
         with adb.connect() as conn:
             p = adb.get_player(conn, pemain.id)
@@ -702,7 +779,7 @@ class Admin(commands.Cog):
     @app_commands.rename(pemain="player", nama="name")
     async def admin_achievement(self, interaction: discord.Interaction,
                                 pemain: discord.User, nama: str):
-        if not await require_staff(interaction):
+        if not await require_staff(interaction, target_id=pemain.id):
             return
         nama = nama.strip()
         if not nama or len(nama) > 32:
@@ -725,6 +802,286 @@ class Admin(commands.Cog):
                       f"applied by the main bot's role reconciler within "
                       f"10 minutes.",
                       COLOR_OK),
+            ephemeral=True)
+
+
+    # ------------------------------------------- phase 3: lifetime
+    @app_commands.command(name="admin_lifetime",
+                          description="Per-player lifetime stats since registration")
+    @app_commands.describe(pemain="Target player (mention or user ID)")
+    @app_commands.rename(pemain="player")
+    async def admin_lifetime(self, interaction: discord.Interaction,
+                             pemain: discord.User):
+        if not await require_staff(interaction, target_id=pemain.id):
+            return
+        with adb.connect() as conn:
+            s = adb.lifetime_stats(conn, pemain.id)
+        if s is None:
+            await interaction.response.send_message(
+                embed=err("That player hasn't registered for the RPG."),
+                ephemeral=True)
+            return
+        since = _wib(s["created_at"]) if s["created_at"] else "unknown"
+        guild_txt = (f"{s['guild_name']} (ID {s['guild_id']})"
+                     if s["guild_id"] else "-")
+        e = emb(f"📜 Lifetime Stats — {s['name']}",
+                f"Class: {s['class']} • Level {s['level']}\n"
+                f"Registered: {since}\n"
+                f"Guild: {guild_txt}\n\n"
+                f"💰 Total gold earned: {s['gold_earned']}\n"
+                f"💰 Current carried gold: {s['gold']}\n"
+                f"🏦 Banked gold: {s['banked_gold']}\n"
+                f"⚔️ Monster kills: {s['kills']}\n"
+                f"🥊 PvP: {s['pvp_wins']} wins / {s['pvp_losses']} losses\n"
+                f"👹 Boss kills (killing blow): {s['boss_kills']}\n"
+                f"🏆 Achievements: {s['achievements']}\n"
+                f"🏰 Guild deposits: {s['deposits_gold']} gold "
+                f"({s['deposits_count']} deposits)\n"
+                f"💸 Tax paid on market buys: {s['tax_paid']} gold\n\n"
+                f"📌 Note: gold earned / kills / PvP wins on the player "
+                f"row reset if the player was ever reset with "
+                f"/admin_player, so after a reset those three read "
+                f"'since last reset'. Boss kills, achievements, "
+                f"deposits, and tax paid are never cleared by reset.",
+                COLOR_INFO)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @app_commands.command(name="admin_lifetimeboard",
+                          description="Top 10 players by a lifetime metric")
+    @app_commands.describe(metrik="Metric to rank by")
+    @app_commands.rename(metrik="metric")
+    @app_commands.choices(
+        metrik=[app_commands.Choice(name="Gold earned", value="gold_earned"),
+                app_commands.Choice(name="Monster kills", value="kills"),
+                app_commands.Choice(name="PvP wins", value="pvp_wins"),
+                app_commands.Choice(name="Boss kills", value="boss_kills"),
+                app_commands.Choice(name="Tax paid", value="tax_paid"),
+                app_commands.Choice(name="Guild deposits", value="deposits")],
+    )
+    async def admin_lifetimeboard(self, interaction: discord.Interaction,
+                                  metrik: str):
+        if not await require_staff(interaction):
+            return
+        with adb.connect() as conn:
+            rows = adb.lifetime_leaderboard(conn, metrik, limit=10)
+        if not rows:
+            await interaction.response.send_message(
+                embed=emb('📜 Lifetime Leaderboard',
+                          'No data for this metric yet.', COLOR_INFO),
+                ephemeral=True)
+            return
+        lines = [f"{i}. <@{uid}> — {val}"
+                 for i, (uid, val) in enumerate(rows, 1)]
+        await interaction.response.send_message(
+            embed=emb(f"📜 Lifetime Leaderboard — {metrik}",
+                      "\n".join(lines), COLOR_GOLD),
+            ephemeral=True)
+
+    # ------------------------------------------- phase 3: tax tools
+    @app_commands.command(name="admin_tax",
+                          description="Tax pool tools: pool, ledger, tops, rate")
+    @app_commands.describe(
+        aksi="pool = balance & totals, ledger = recent sales, tops = top taxpayers/depositors, set_rate = stored market tax percent",
+        persen="Market tax percent for set_rate (0-50, default live rate is 10)")
+    @app_commands.rename(aksi="action", persen="percent")
+    @app_commands.choices(
+        aksi=[app_commands.Choice(name="pool", value="pool"),
+              app_commands.Choice(name="ledger", value="ledger"),
+              app_commands.Choice(name="tops", value="tops"),
+              app_commands.Choice(name="set_rate", value="set_rate")],
+    )
+    async def admin_tax(self, interaction: discord.Interaction,
+                        aksi: str, persen: int = None):
+        if not await require_staff(interaction):
+            return
+        with adb.connect() as conn:
+            if aksi == "pool":
+                t = adb.tax_totals(conn)
+                rate = adb.get_tax_rate(conn)
+                desc = (f"💰 Pool balance: **{t['pool']} gold**\n"
+                        f"💸 Total tax collected: {t['collected']} gold "
+                        f"({t['sales']} sales)\n"
+                        f"🎉 Total given away from pool: {t['given_away']} gold\n"
+                        f"📊 Stored market tax rate: {rate}% "
+                        f"(live market rate is 10% until the main bot "
+                        f"reads this setting — see /admin_tax set_rate note).")
+                await interaction.response.send_message(
+                    embed=emb('💰 Bot Tax Pool', desc, COLOR_INFO),
+                    ephemeral=True)
+                return
+            if aksi == "ledger":
+                rows = adb.tax_ledger_recent(conn, limit=10)
+                if not rows:
+                    await interaction.response.send_message(
+                        embed=emb('💰 Tax Ledger', 'No market sales yet.',
+                                  COLOR_INFO),
+                        ephemeral=True)
+                    return
+                lines = []
+                for r in rows:
+                    lines.append(
+                        f"#{r['id']} • buyer <@{r['buyer_id']}> • "
+                        f"{r['item_id']} x{r['qty']} • price {r['sale_price']} "
+                        f"• tax {r['tax']} • {_wib_s(r['created_at'])}")
+                await interaction.response.send_message(
+                    embed=emb('💰 Recent Tax Ledger', "\n".join(lines),
+                              COLOR_INFO),
+                    ephemeral=True)
+                return
+            if aksi == "tops":
+                players = adb.top_tax_players(conn, limit=5)
+                guilds = adb.top_tax_guilds(conn, limit=5)
+                deps = adb.top_depositors(conn, limit=5)
+                lines = ["💸 Top taxpayers (players):"]
+                lines += ([f"{i}. <@{u}> — {v} gold"
+                           for i, (u, v) in enumerate(players, 1)]
+                          or ["- none yet -"])
+                lines.append("")
+                lines.append("💸 Top taxpayers (guilds, by buyer guild):")
+                lines += ([f"{i}. Guild ID {g} — {v} gold"
+                           for i, (g, v) in enumerate(guilds, 1)]
+                          or ["- none yet -"])
+                lines.append("")
+                lines.append("🏰 Top depositors (gold to guild banks):")
+                lines += ([f"{i}. <@{u}> — {v} gold"
+                           for i, (u, v) in enumerate(deps, 1)]
+                          or ["- none yet -"])
+                await interaction.response.send_message(
+                    embed=emb('💰 Tax & Donation Leaderboards',
+                              "\n".join(lines), COLOR_GOLD),
+                    ephemeral=True)
+                return
+            # aksi == set_rate
+            if persen is None:
+                await interaction.response.send_message(
+                    embed=err("Fill in percent (0-50) for set_rate."),
+                    ephemeral=True)
+                return
+            new = adb.set_tax_rate(conn, persen, interaction.user.id)
+            if new is None:
+                await interaction.response.send_message(
+                    embed=err("Tax percent must be 0-50."),
+                    ephemeral=True)
+                return
+        await interaction.response.send_message(
+            embed=emb('💰 Market Tax Rate Stored',
+                      f"Stored market tax rate is now **{new}%**.\n\n"
+                      f"📌 Honest note: this is stored-only for now. The "
+                      f"main bot's market code still applies its fixed "
+                      f"10% tax, exactly like admin_rates and "
+                      f"admin_events before it — applying a stored rate "
+                      f"needs a small main-bot patch (see SETUP.md). "
+                      f"The stored value is already saved here.",
+                      COLOR_OK),
+            ephemeral=True)
+
+    # ------------------------------------------- phase 3: bot admins
+    @app_commands.command(name="admin_botadmin",
+                          description="Grant / revoke / list bot-admins (Discord Administrators only)")
+    @app_commands.describe(
+        aksi="grant = give bot-admin, revoke = remove it, list = show bot-admins",
+        pemain="Target player (mention or user ID; not needed for list)")
+    @app_commands.rename(aksi="action", pemain="player")
+    @app_commands.choices(
+        aksi=[app_commands.Choice(name="grant", value="grant"),
+              app_commands.Choice(name="revoke", value="revoke"),
+              app_commands.Choice(name="list", value="list")],
+    )
+    async def admin_botadmin(self, interaction: discord.Interaction,
+                             aksi: str, pemain: discord.User = None):
+        if not await require_discord_admin(
+                interaction, target_id=pemain.id if pemain else None):
+            return
+        with adb.connect() as conn:
+            if aksi == "list":
+                rows = adb.list_bot_admins(conn)
+                if not rows:
+                    await interaction.response.send_message(
+                        embed=emb('🛡️ Bot-Admins', 'No bot-admins granted yet.',
+                                  COLOR_INFO),
+                        ephemeral=True)
+                    return
+                lines = [f"<@{r['user_id']}> • granted by "
+                         f"<@{r['granted_by']}> • {_wib(r['granted_at'])}"
+                         for r in rows]
+                await interaction.response.send_message(
+                    embed=emb('🛡️ Bot-Admins', "\n".join(lines), COLOR_INFO),
+                    ephemeral=True)
+                return
+            if pemain is None:
+                await interaction.response.send_message(
+                    embed=err("Pick a player first for grant/revoke."),
+                    ephemeral=True)
+                return
+            if aksi == "grant":
+                member = (interaction.guild.get_member(pemain.id)
+                          if interaction.guild else None)
+                if member is not None and adb.is_staff(member):
+                    await interaction.response.send_message(
+                        embed=err("That user is already a Discord "
+                                  "Administrator, so they do not need "
+                                  "bot-admin."),
+                        ephemeral=True)
+                    return
+                new = adb.grant_bot_admin(conn, pemain.id,
+                                          interaction.user.id)
+                msg = ('is now a bot-admin and can run admin commands '
+                       'without Discord Administrator permission.'
+                       if new else 'is already a bot-admin.')
+                await interaction.response.send_message(
+                    embed=emb('🛡️ Bot-Admin Granted',
+                              f"<@{pemain.id}> {msg}\n\n"
+                              f"📌 Bot-admins can never grant bot-admin "
+                              f"to anyone else — granting stays "
+                              f"Discord-Administrator-only.",
+                              COLOR_OK),
+                    ephemeral=True)
+                return
+            # aksi == revoke
+            ok = adb.revoke_bot_admin(conn, pemain.id)
+            msg = ('is no longer a bot-admin.'
+                   if ok else 'is not a bot-admin.')
+            await interaction.response.send_message(
+                embed=emb('🛡️ Bot-Admin Revoked',
+                          f"<@{pemain.id}> {msg}", COLOR_OK),
+                ephemeral=True)
+
+    # ------------------------------------------- phase 3: admin logs
+    @app_commands.command(name="admin_logs",
+                          description="View recent admin command logs")
+    @app_commands.describe(
+        pelaksana="Filter by executor (mention or user ID, optional)",
+        perintah="Filter by command name, e.g. admin_player (optional)",
+        batas="How many entries to show (1-50, default 20)")
+    @app_commands.rename(pelaksana="executor", perintah="command",
+                         batas="limit")
+    async def admin_logs(self, interaction: discord.Interaction,
+                         pelaksana: discord.User = None,
+                         perintah: str = None, batas: int = 20):
+        if not await require_staff(interaction):
+            return
+        batas = max(1, min(50, batas))
+        with adb.connect() as conn:
+            rows = adb.list_admin_logs(
+                conn, limit=batas,
+                executor_id=pelaksana.id if pelaksana else None,
+                command=perintah.strip() if perintah else None)
+        if not rows:
+            await interaction.response.send_message(
+                embed=emb('📋 Admin Logs', 'No log entries match.',
+                          COLOR_INFO),
+                ephemeral=True)
+            return
+        lines = []
+        for r in rows:
+            target = f"<@{r['target_id']}>" if r["target_id"] else "-"
+            guild = (f"{r['guild_name']} ({r['guild_id']})"
+                     if r["guild_id"] else "-")
+            lines.append(
+                f"{_wib_s(r['created_at'])} • `{r['command']}` • "
+                f"by <@{r['executor_id']}> • target {target} • {guild}")
+        await interaction.response.send_message(
+            embed=emb('📋 Recent Admin Logs', "\n".join(lines), COLOR_INFO),
             ephemeral=True)
 
 

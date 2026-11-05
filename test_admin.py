@@ -205,6 +205,123 @@ def main():
     check("tax giveaway tercatat",
           rows and rows[0]["id"] == gid3 and rows[0]["total_gold"] == 99)
 
+    # --- phase 3: bot admins (grant/revoke/list, idempotent)
+    check("bot-admin awal tidak ada", adb.is_bot_admin(conn, 7) is False)
+    check("grant bot-admin baru",
+          adb.grant_bot_admin(conn, 7, 9) is True
+          and adb.is_bot_admin(conn, 7) is True)
+    check("grant bot-admin idempotent",
+          adb.grant_bot_admin(conn, 7, 9) is False)
+    check("list bot-admin",
+          [r["user_id"] for r in adb.list_bot_admins(conn)] == [7])
+    check("revoke bot-admin",
+          adb.revoke_bot_admin(conn, 7) is True
+          and adb.is_bot_admin(conn, 7) is False)
+    check("revoke bot-admin tak ada ditolak",
+          adb.revoke_bot_admin(conn, 7) is False)
+
+    # --- phase 3: admin logs (isi, filter, retensi)
+    adb.log_admin(conn, "admin_player", 9, target_id=1,
+                  guild_id=1465422166790242377, guild_name="NEWR LABS",
+                  created_at=1793811600)
+    adb.log_admin(conn, "admin_currency", 9, target_id=2,
+                  guild_id=1465422166790242377, guild_name="NEWR LABS",
+                  created_at=1793811601)
+    adb.log_admin(conn, "admin_player", 7, target_id=1,
+                  guild_id=1465422166790242377, guild_name="NEWR LABS",
+                  created_at=1793811602)
+    logs = adb.list_admin_logs(conn)
+    check("log admin tersimpan & terbaru dulu",
+          len(logs) == 3 and logs[0]["command"] == "admin_player"
+          and logs[0]["executor_id"] == 7
+          and logs[0]["target_id"] == 1
+          and logs[0]["guild_id"] == 1465422166790242377
+          and logs[0]["guild_name"] == "NEWR LABS")
+    check("log filter executor",
+          len(adb.list_admin_logs(conn, executor_id=9)) == 2)
+    check("log filter command",
+          len(adb.list_admin_logs(conn, command="admin_player")) == 2)
+    check("log filter command case-insensitive",
+          len(adb.list_admin_logs(conn, command="ADMIN_PLAYER")) == 2)
+    for i in range(5):
+        adb.log_admin(conn, "admin_stats", 9, retain=3)
+    check("retensi log 1000 default, prune kecil bekerja",
+          len(adb.list_admin_logs(conn, limit=50)) == 3)
+
+    # --- phase 3: lifetime stats
+    conn.execute(
+        "INSERT INTO players (user_id, name, class, hp, max_hp, mp, max_mp,"
+        " atk, def, spd, gold, gold_earned, kills, wins, created_at)"
+        " VALUES (3, 'Lifer', 'Archer', 95, 95, 60, 60, 15, 7, 12, 250,"
+        " 5000, 42, 9, 1793811600)"
+    )
+    conn.execute(
+        "INSERT INTO pvp_rank (user_id, points, wins, losses)"
+        " VALUES (3, 1100, 6, 2)"
+    )
+    conn.execute(
+        "INSERT INTO boss_kills (boss, raid_id, killer_id, killer_power,"
+        " killer_damage, killed_at) VALUES ('Raja Slime', 1, 3, 900, 50,"
+        " 1793811700)"
+    )
+    conn.execute(
+        "INSERT INTO boss_kills (boss, raid_id, killer_id, killer_power,"
+        " killer_damage, killed_at) VALUES ('Raja Slime', 2, 3, 950, 60,"
+        " 1793811800)"
+    )
+    conn.execute(
+        "INSERT INTO achievements (user_id, achievement, granted_at)"
+        " VALUES (3, 'Boss Slayer', 1793811700)"
+    )
+    conn.execute(
+        "INSERT INTO guild_bank_deposits (guild_id, user_id, kind, gold,"
+        " created_at) VALUES (1, 3, 'gold', 800, 1793811700)"
+    )
+    conn.execute(
+        "INSERT INTO tax_ledger (buyer_id, buyer_guild_id, seller_guild_id,"
+        " item_id, qty, sale_price, tax, created_at)"
+        " VALUES (3, 1, 2, 'potion kecil', 1, 1000, 100, 1793811700)"
+    )
+    conn.execute(
+        "INSERT INTO personal_bank (user_id, balance, last_accrual)"
+        " VALUES (3, 400, 1793811700)"
+    )
+    conn.commit()
+    s = adb.lifetime_stats(conn, 3)
+    check("lifetime stats lengkap",
+          s is not None and s["gold_earned"] == 5000
+          and s["kills"] == 42 and s["pvp_wins"] == 6
+          and s["pvp_losses"] == 2 and s["boss_kills"] == 2
+          and s["achievements"] == 1 and s["deposits_gold"] == 800
+          and s["tax_paid"] == 100 and s["banked_gold"] == 400
+          and s["created_at"] == 1793811600)
+    check("lifetime stats pemain tak ada",
+          adb.lifetime_stats(conn, 999) is None)
+    check("lifetime board boss_kills",
+          adb.lifetime_leaderboard(conn, "boss_kills") == [(3, 2)])
+    check("lifetime board gold_earned urut",
+          adb.lifetime_leaderboard(conn, "gold_earned")[0] == (3, 5000))
+    check("lifetime board metrik tak dikenal kosong",
+          adb.lifetime_leaderboard(conn, "nope") == [])
+
+    # --- phase 3: tax admin tools
+    check("tax rate default 10", adb.get_tax_rate(conn) == 10)
+    check("tax rate set 15", adb.set_tax_rate(conn, 15, 9) == 15
+          and adb.get_tax_rate(conn) == 15)
+    check("tax rate di luar 0-50 ditolak",
+          adb.set_tax_rate(conn, 51, 9) is None
+          and adb.get_tax_rate(conn) == 15)
+    t = adb.tax_totals(conn)
+    check("tax totals",
+          t["collected"] == 100 and t["sales"] == 1)
+    check("tax ledger recent",
+          len(adb.tax_ledger_recent(conn)) == 1
+          and adb.tax_ledger_recent(conn)[0]["tax"] == 100)
+    check("top tax players",
+          adb.top_tax_players(conn) == [(3, 100)])
+    check("top depositors",
+          adb.top_depositors(conn) == [(3, 800)])
+
     conn.close()
     failed = [n for n, ok in CHECKS if not ok]
     print()

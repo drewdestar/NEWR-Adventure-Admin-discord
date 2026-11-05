@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NEWR Adventure by NEWR LABS — credit marker, do not remove.
 """Lapisan database bot admin RPG.
 
 Database YANG SAMA dengan bot RPG: ~/workspace/bots/rpg/rpg.db.
@@ -102,7 +103,57 @@ CREATE TABLE IF NOT EXISTS tax_giveaways (
     created_by INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS bot_admins (
+    user_id INTEGER PRIMARY KEY,
+    granted_by INTEGER NOT NULL DEFAULT 0,
+    granted_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS admin_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command TEXT NOT NULL,
+    executor_id INTEGER NOT NULL,
+    target_id INTEGER,
+    guild_id INTEGER,
+    guild_name TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS admin_tax_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    market_tax_pct INTEGER NOT NULL DEFAULT 10,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    updated_by INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS boss_kills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    boss TEXT NOT NULL,
+    raid_id INTEGER,
+    killer_id INTEGER NOT NULL,
+    killer_power INTEGER NOT NULL DEFAULT 0,
+    killer_damage INTEGER NOT NULL DEFAULT 0,
+    killed_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS guild_bank_deposits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    item_id TEXT,
+    qty INTEGER NOT NULL DEFAULT 0,
+    gold INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS personal_bank (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0,
+    last_accrual INTEGER NOT NULL DEFAULT 0
+);
 """
+
+# Phase 3 defaults.
+ADMIN_LOG_RETENTION = 1000  # keep the newest 1000 admin log entries
+DEFAULT_MARKET_TAX_PCT = 10  # matches guildbank_db.MARKET_TAX_PCT today
+MIN_MARKET_TAX_PCT = 0
+MAX_MARKET_TAX_PCT = 50
 
 # Season 1 starts at bot launch day: 2026-11-05 00:00 WIB (UTC+7).
 # Must match the main bot's rolesync.SEASON_1_START.
@@ -489,6 +540,262 @@ def economy_stats(conn):
         "total_pets": total_pets,
         "banned": banned,
     }
+
+
+# ------------------------------------------- phase 3: bot admins
+def is_bot_admin(conn, user_id):
+    row = conn.execute(
+        "SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return row is not None
+
+
+def grant_bot_admin(conn, user_id, by_id):
+    """Grant bot-admin. Returns True if newly granted, False if already."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO bot_admins (user_id, granted_by, granted_at)"
+        " VALUES (?, ?, ?)", (user_id, by_id, int(time.time())))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def revoke_bot_admin(conn, user_id):
+    cur = conn.execute(
+        "DELETE FROM bot_admins WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_bot_admins(conn):
+    rows = conn.execute(
+        "SELECT * FROM bot_admins ORDER BY granted_at, user_id").fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+# ------------------------------------------- phase 3: admin logs
+def log_admin(conn, command, executor_id, target_id=None, guild_id=None,
+              guild_name="", created_at=None, retain=ADMIN_LOG_RETENTION):
+    """Log one authorized admin command execution, then prune to the
+    newest `retain` entries (default 1000). Timestamps are Unix seconds;
+    WIB formatting (with seconds) happens at display time."""
+    now = int(created_at if created_at is not None else time.time())
+    cur = conn.execute(
+        "INSERT INTO admin_logs (command, executor_id, target_id, guild_id,"
+        " guild_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (command, executor_id, target_id, guild_id, guild_name or "", now))
+    conn.execute(
+        "DELETE FROM admin_logs WHERE id NOT IN "
+        "(SELECT id FROM admin_logs ORDER BY id DESC LIMIT ?)",
+        (int(retain),))
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_admin_logs(conn, limit=20, executor_id=None, command=None):
+    """Newest first. limit is clamped to 1-50 by the caller; here it is
+    only bounded below so pure-function tests can pass any value."""
+    limit = max(1, int(limit))
+    query = "SELECT * FROM admin_logs"
+    params = []
+    clauses = []
+    if executor_id is not None:
+        clauses.append("executor_id = ?")
+        params.append(int(executor_id))
+    if command:
+        clauses.append("command = ? COLLATE NOCASE")
+        params.append(str(command))
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+# ------------------------------------------- phase 3: lifetime stats
+def _table_exists(conn, name):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,)).fetchone()
+    return row is not None
+
+
+def _scalar(conn, query, params=(), default=0):
+    try:
+        row = conn.execute(query, params).fetchone()
+    except Exception:  # noqa: BLE001 — missing table/column: treat as 0
+        return default
+    if row is None or row[0] is None:
+        return default
+    return row[0]
+
+
+def lifetime_stats(conn, user_id):
+    """Per-player lifetime stats. Counters that live on the player row
+    (gold_earned, kills, wins) are cleared by /admin_player reset, so
+    after a reset they read "since last reset"; boss kills,
+    achievements, deposits, and tax paid are never cleared by reset and
+    therefore survive it. created_at is never reset either, so the
+    "since" date stays the original registration date."""
+    p = get_player(conn, user_id)
+    if p is None:
+        return None
+    pvp_wins = _scalar(
+        conn, "SELECT wins FROM pvp_rank WHERE user_id = ?", (user_id,))
+    pvp_losses = _scalar(
+        conn, "SELECT losses FROM pvp_rank WHERE user_id = ?", (user_id,))
+    boss_kills = _scalar(
+        conn, "SELECT COUNT(*) FROM boss_kills WHERE killer_id = ?",
+        (user_id,))
+    achievements = _scalar(
+        conn, "SELECT COUNT(*) FROM achievements WHERE user_id = ?",
+        (user_id,))
+    deposits_gold = _scalar(
+        conn, "SELECT COALESCE(SUM(gold), 0) FROM guild_bank_deposits"
+        " WHERE user_id = ? AND kind = 'gold'", (user_id,))
+    deposits_count = _scalar(
+        conn, "SELECT COUNT(*) FROM guild_bank_deposits WHERE user_id = ?",
+        (user_id,))
+    tax_paid = _scalar(
+        conn, "SELECT COALESCE(SUM(tax), 0) FROM tax_ledger"
+        " WHERE buyer_id = ?", (user_id,))
+    banked = _scalar(
+        conn, "SELECT balance FROM personal_bank WHERE user_id = ?",
+        (user_id,))
+    guild_name = None
+    if p.get("guild_id"):
+        guild_name = _scalar(
+            conn, "SELECT name FROM guilds WHERE id = ?",
+            (p["guild_id"],), default=None)
+    return {
+        "user_id": user_id,
+        "name": p["name"],
+        "class": p["class"],
+        "level": p["level"],
+        "gold": p["gold"],
+        "gold_earned": p["gold_earned"],
+        "kills": p["kills"],
+        "wins": p["wins"],
+        "pvp_wins": pvp_wins,
+        "pvp_losses": pvp_losses,
+        "boss_kills": boss_kills,
+        "achievements": achievements,
+        "deposits_gold": deposits_gold,
+        "deposits_count": deposits_count,
+        "tax_paid": tax_paid,
+        "banked_gold": banked,
+        "guild_id": p.get("guild_id"),
+        "guild_name": guild_name,
+        "created_at": p.get("created_at", 0),
+    }
+
+
+def lifetime_leaderboard(conn, metric, limit=10):
+    """Top players by one lifetime metric. boss_kills is a per-killer
+    count over boss_kills; the rest read player/pvp/tax/deposit rows.
+    Returns [(user_id, value), ...] newest-tie order is by user_id."""
+    limit = max(1, int(limit))
+    if metric == "boss_kills":
+        rows = conn.execute(
+            "SELECT killer_id AS user_id, COUNT(*) AS v FROM boss_kills"
+            " GROUP BY killer_id ORDER BY v DESC, user_id LIMIT ?",
+            (limit,)).fetchall()
+        return [(r["user_id"], r["v"]) for r in rows]
+    if metric == "pvp_wins":
+        rows = conn.execute(
+            "SELECT user_id, wins AS v FROM pvp_rank ORDER BY v DESC,"
+            " user_id LIMIT ?", (limit,)).fetchall()
+        return [(r["user_id"], r["v"]) for r in rows]
+    if metric == "tax_paid":
+        rows = conn.execute(
+            "SELECT buyer_id AS user_id, SUM(tax) AS v FROM tax_ledger"
+            " GROUP BY buyer_id ORDER BY v DESC, user_id LIMIT ?",
+            (limit,)).fetchall()
+        return [(r["user_id"], r["v"]) for r in rows]
+    if metric == "deposits":
+        rows = conn.execute(
+            "SELECT user_id, SUM(gold) AS v FROM guild_bank_deposits"
+            " WHERE kind = 'gold' GROUP BY user_id ORDER BY v DESC,"
+            " user_id LIMIT ?", (limit,)).fetchall()
+        return [(r["user_id"], r["v"]) for r in rows]
+    column = {"gold_earned": "gold_earned", "kills": "kills"}.get(metric)
+    if column is None:
+        return []
+    rows = conn.execute(
+        f"SELECT user_id, {column} AS v FROM players ORDER BY v DESC,"
+        " user_id LIMIT ?", (limit,)).fetchall()
+    return [(r["user_id"], r["v"]) for r in rows]
+
+
+# ------------------------------------------- phase 3: tax admin tools
+def get_tax_rate(conn):
+    row = conn.execute(
+        "SELECT market_tax_pct FROM admin_tax_settings WHERE id = 1"
+    ).fetchone()
+    return row["market_tax_pct"] if row else DEFAULT_MARKET_TAX_PCT
+
+
+def set_tax_rate(conn, pct, by_id=0):
+    """Store the market tax percent. Returns the stored value, or None
+    if out of the 0-50 range. NOTE: this is stored-only for now — the
+    main bot's market code still uses its fixed 10% constant, exactly
+    like admin_rates/admin_events before it (see SETUP.md)."""
+    pct = int(pct)
+    if pct < MIN_MARKET_TAX_PCT or pct > MAX_MARKET_TAX_PCT:
+        return None
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO admin_tax_settings (id, market_tax_pct, updated_at,"
+        " updated_by) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET"
+        " market_tax_pct = excluded.market_tax_pct,"
+        " updated_at = excluded.updated_at,"
+        " updated_by = excluded.updated_by",
+        (pct, now, by_id))
+    conn.commit()
+    return pct
+
+
+def tax_totals(conn):
+    return {
+        "pool": tax_pool_balance(conn),
+        "collected": _scalar(
+            conn, "SELECT COALESCE(SUM(tax), 0) FROM tax_ledger"),
+        "given_away": _scalar(
+            conn, "SELECT COALESCE(SUM(total_gold), 0) FROM tax_giveaways"),
+        "sales": _scalar(conn, "SELECT COUNT(*) FROM tax_ledger"),
+    }
+
+
+def tax_ledger_recent(conn, limit=10):
+    rows = conn.execute(
+        "SELECT * FROM tax_ledger ORDER BY id DESC LIMIT ?",
+        (max(1, int(limit)),)).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def top_tax_players(conn, limit=5):
+    rows = conn.execute(
+        "SELECT buyer_id, SUM(tax) AS total FROM tax_ledger"
+        " GROUP BY buyer_id ORDER BY total DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [(r["buyer_id"], r["total"]) for r in rows]
+
+
+def top_tax_guilds(conn, limit=5):
+    rows = conn.execute(
+        "SELECT buyer_guild_id, SUM(tax) AS total FROM tax_ledger"
+        " WHERE buyer_guild_id IS NOT NULL GROUP BY buyer_guild_id"
+        " ORDER BY total DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [(r["buyer_guild_id"], r["total"]) for r in rows]
+
+
+def top_depositors(conn, limit=5):
+    rows = conn.execute(
+        "SELECT user_id, SUM(gold) AS total FROM guild_bank_deposits"
+        " WHERE kind = 'gold' GROUP BY user_id ORDER BY total DESC"
+        " LIMIT ?", (limit,)).fetchall()
+    return [(r["user_id"], r["total"]) for r in rows]
 
 
 # -------------------------------------------------------- gate murni

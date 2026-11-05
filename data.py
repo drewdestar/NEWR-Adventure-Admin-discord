@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# NEWR Adventure by NEWR LABS — credit marker, do not remove.
 """Data statis bot admin RPG — disalin dari daftar bot RPG (read-only).
 
 Bot admin TIDAK mengimpor kode bot RPG: daftar ini disalin agar bot admin
